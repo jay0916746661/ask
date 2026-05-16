@@ -266,6 +266,7 @@ with summary_tab:
         cat = st.selectbox('分類', cats)
         sources = ['全部', '本機', 'Google Drive', '本機 + Google Drive']
         source = st.selectbox('來源', sources)
+        sort_mode = st.selectbox('排序', ['最新加入', '閱讀最多', '頁數最多', '書名 A-Z'])
         show_missing = st.checkbox('只看 Drive 有但本機沒有', value=False)
     filtered = books
     if q.strip():
@@ -276,6 +277,22 @@ with summary_tab:
         filtered = [b for b in filtered if b.get('source') == source]
     if show_missing:
         filtered = [b for b in filtered if not b.get('exists')]
+    if sort_mode == '最新加入':
+        filtered = sorted(filtered, key=lambda b: (b.get('added_date', ''), b.get('mtime', 0)), reverse=True)
+    elif sort_mode == '閱讀最多':
+        filtered = sorted(
+            filtered,
+            key=lambda b: (
+                progress.get(b.get('title', ''), {}).get('minutes', 0),
+                progress.get(b.get('title', ''), {}).get('pages', 0),
+                b.get('added_date', ''),
+            ),
+            reverse=True,
+        )
+    elif sort_mode == '頁數最多':
+        filtered = sorted(filtered, key=lambda b: int(b.get('page_count') or 0), reverse=True)
+    else:
+        filtered = sorted(filtered, key=lambda b: b.get('title', '').lower())
 
     rows = []
     for b in filtered:
@@ -361,6 +378,14 @@ with summary_tab:
                 m3.metric('大小(MB)', selected.get('size_mb') or '—')
                 m4.metric('進度', f'{progress_pct}%')
                 st.progress(progress_pct / 100 if progress_pct else 0, text=f'已讀 {current_pages} / {total_pages or "?"} 頁')
+                action_col1, action_col2 = st.columns([1, 1])
+                with action_col1:
+                    if st.button('帶到單本閱讀', key='jump_to_reader', use_container_width=True):
+                        st.session_state['reader_book'] = selected.get('title', '')
+                        st.success('已幫你選好這本書，切到「單本閱讀」分頁就能直接看。')
+                with action_col2:
+                    if selected.get('exists'):
+                        st.caption('可在下方 `📘 單本閱讀` 直接續讀')
                 if selected.get('local_path'):
                     st.code(selected.get('local_path'))
                 if selected.get('preview'):
