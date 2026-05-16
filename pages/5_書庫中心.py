@@ -65,6 +65,19 @@ def recent_books(books, days=7):
     return out
 
 
+def weekly_logs(logs):
+    cutoff = datetime.now() - timedelta(days=7)
+    out = []
+    for log in logs:
+        try:
+            dt = datetime.strptime(log['date'], '%Y-%m-%d')
+        except Exception:
+            continue
+        if dt >= cutoff:
+            out.append(log)
+    return out
+
+
 def category_style(category: str) -> tuple[str, str]:
     palette = {
         '投資/財富': ('#21493d', '#f4efe4'),
@@ -114,17 +127,30 @@ def pick_featured_book(books: list[dict]) -> dict | None:
     return sorted_books[0]
 
 
-def weekly_logs(logs):
-    cutoff = datetime.now() - timedelta(days=7)
-    out = []
-    for log in logs:
-        try:
-            dt = datetime.strptime(log['date'], '%Y-%m-%d')
-        except Exception:
-            continue
-        if dt >= cutoff:
-            out.append(log)
-    return out
+def book_logs(logs, title: str):
+    return [x for x in logs if x.get('title') == title]
+
+
+def format_minutes(total: int) -> str:
+    if total < 60:
+        return f'{total} 分'
+    h = total // 60
+    m = total % 60
+    return f'{h}h {m}m' if m else f'{h}h'
+
+
+def preview_paragraphs(text: str):
+    if not text:
+        return []
+    blocks = [b.strip() for b in text.replace('\r', '\n').split('\n\n') if b.strip()]
+    if blocks:
+        return blocks[:18]
+    text = text.replace('\n', ' ')
+    chunks = []
+    while text:
+        chunks.append(text[:180].strip())
+        text = text[180:]
+    return [c for c in chunks if c]
 
 
 st.title('📚 書庫中心')
@@ -158,7 +184,7 @@ c4.metric('最近 7 天新書', len(recent_books(books)))
 
 st.caption(f"上次同步：{meta.get('updated_at', '尚未同步')} · 本機 {meta.get('local_count', 0)} 本 · Drive {meta.get('drive_count', 0)} 本 · 合併 {meta.get('merged_count', 0)} 本")
 
-summary_tab, sync_tab, reading_tab = st.tabs(['📖 書庫總覽', '🔄 同步狀態', '📝 每週閱讀報告'])
+summary_tab, sync_tab, reading_tab, reader_tab = st.tabs(['📖 書庫總覽', '🔄 同步狀態', '📝 每週閱讀報告', '📘 單本閱讀'])
 
 with summary_tab:
     left, right = st.columns([1, 3])
@@ -317,3 +343,75 @@ with reading_tab:
                 st.markdown(line)
     else:
         st.info('本週還沒有閱讀記錄。')
+
+with reader_tab:
+    st.subheader('單本閱讀')
+    readable_books = [b for b in books if b.get('exists') and (b.get('preview') or b.get('local_path'))]
+    if not readable_books:
+        st.info('目前還沒有可閱讀的本機書。先同步或把書放進電子書資料夾。')
+    else:
+        selected_title = st.selectbox('選擇要閱讀的書', [b.get('title', '') for b in readable_books], key='reader_book')
+        selected = next((b for b in readable_books if b.get('title') == selected_title), readable_books[0])
+        book_week_logs = book_logs(logs, selected.get('title', ''))
+        total_minutes = sum(int(x.get('minutes', 0)) for x in book_week_logs)
+        total_pages = sum(int(x.get('pages', 0)) for x in book_week_logs)
+        font_size = st.slider('字體大小', min_value=14, max_value=28, value=18)
+        top_left, top_right = st.columns([1, 2], gap='large')
+        with top_left:
+            render_cover(selected)
+            if selected.get('local_path') and Path(selected['local_path']).exists():
+                p = Path(selected['local_path'])
+                if p.stat().st_size <= 25 * 1024 * 1024:
+                    st.download_button('下載原檔', data=p.read_bytes(), file_name=p.name, use_container_width=True)
+                else:
+                    st.caption('檔案超過 25MB，保留本機路徑供直接開啟。')
+                st.code(str(p))
+        with top_right:
+            st.markdown(f"### {selected.get('title', '')}")
+            st.caption(f"{selected.get('author') or '作者未解析'} · {selected.get('category','其他')} · {selected.get('format','').upper()} · {selected.get('source','')}")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric('頁數/章數', selected.get('page_count') or '—')
+            m2.metric('大小(MB)', selected.get('size_mb') or '—')
+            m3.metric('本週閱讀頁數', total_pages)
+            m4.metric('本週閱讀時間', format_minutes(total_minutes))
+            st.markdown('**閱讀內容**')
+            paragraphs = preview_paragraphs(selected.get('preview', ''))
+            if paragraphs:
+                body = ''.join([
+                    f"<p style='font-size:{font_size}px; line-height:1.95; margin:0 0 16px 0; color:#1f1b18;'>{p}</p>"
+                    for p in paragraphs
+                ])
+                st.markdown(
+                    f"<div style='background:#fcfaf6;border:1px solid #e8dfd1;border-radius:14px;padding:22px 24px; max-height:760px; overflow:auto;'>{body}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.info('這本書目前沒有可讀預覽。')
+
+            st.divider()
+            st.markdown('**快速記錄這本書**')
+            with st.form('reader_log', clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    pages = st.number_input('本次閱讀頁數', min_value=0, value=8, step=1, key='reader_pages')
+                with c2:
+                    minutes = st.number_input('本次閱讀分鐘', min_value=0, value=15, step=5, key='reader_minutes')
+                note = st.text_area('本次筆記 / 重點', key='reader_note')
+                submitted = st.form_submit_button('儲存這本書的閱讀記錄')
+                if submitted:
+                    reading['logs'].append({
+                        'date': datetime.now().strftime('%Y-%m-%d'),
+                        'title': selected.get('title', ''),
+                        'category': selected.get('category', '其他'),
+                        'pages': int(pages),
+                        'minutes': int(minutes),
+                        'note': note.strip(),
+                    })
+                    save_reading(reading)
+                    st.success('已儲存閱讀記錄')
+                    st.rerun()
+
+            if book_week_logs:
+                st.markdown('**這本書最近的閱讀記錄**')
+                for row in reversed(book_week_logs[-8:]):
+                    st.markdown(f"- `{row['date']}` {row['minutes']} 分 / {row['pages']} 頁 · {row.get('note', '')}")
