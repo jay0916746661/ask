@@ -354,9 +354,16 @@ with summary_tab:
                     st.markdown(f"**{b.get('title', '')[:28]}**")
                     st.caption(f"{b.get('category', '其他')} · {(b.get('format') or '—').upper()}")
                     st.progress(pct / 100 if pct else 0, text=f'{pct}%')
-                    if st.button('查看詳情', key=f'shelf_pick_{idx}', use_container_width=True):
-                        st.session_state[selected_key] = b.get('title', '')
-                        st.rerun()
+                    btn1, btn2 = st.columns(2)
+                    with btn1:
+                        if st.button('查看詳情', key=f'shelf_pick_{idx}', use_container_width=True):
+                            st.session_state[selected_key] = b.get('title', '')
+                            st.rerun()
+                    with btn2:
+                        if st.button('直接閱讀', key=f'shelf_read_{idx}', use_container_width=True):
+                            st.session_state[selected_key] = b.get('title', '')
+                            st.session_state['reader_book'] = b.get('title', '')
+                            st.success('已幫你選好這本書，切到「📘 單本閱讀」就能直接看。')
             if len(filtered) > 24:
                 st.caption(f'目前先顯示前 24 本，已篩選到 {len(filtered)} 本。可以縮小篩選條件更快找到書。')
 
@@ -411,20 +418,23 @@ with summary_tab:
     st.subheader('最近新增')
     latest = recent_books(books, days=14)[:12]
     if latest:
-        cols = st.columns(3)
+        cols = st.columns(4)
         for idx, b in enumerate(latest):
-            with cols[idx % 3]:
-                bg, fg = category_style(b.get('category'))
-                st.markdown(
-                    f"""
-                    <div style="background:{fg}; border:1px solid #eadfcd; border-radius:12px; padding:14px 14px 12px; min-height:150px; margin-bottom:12px;">
-                        <div style="font-size:11px; letter-spacing:0.14em; color:#6f6254;">NEW ARRIVAL · {b.get('added_date', '')}</div>
-                        <div style="font-size:18px; font-weight:700; line-height:1.35; margin:10px 0 8px; color:#1f1b18;">{b.get('title', '')[:80]}</div>
-                        <div style="font-size:12px; color:#665b50;">{b.get('category', '其他')} · {b.get('source', '')}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+            with cols[idx % 4]:
+                render_cover(b, f'latest_cover_{idx}')
+                st.caption(f"NEW · {b.get('added_date', '')}")
+                st.markdown(f"**{b.get('title', '')[:30]}**")
+                st.caption(f"{b.get('category', '其他')} · {b.get('source', '')}")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button('詳情', key=f'latest_pick_{idx}', use_container_width=True):
+                        st.session_state[selected_key] = b.get('title', '')
+                        st.rerun()
+                with c2:
+                    if st.button('閱讀', key=f'latest_read_{idx}', use_container_width=True):
+                        st.session_state[selected_key] = b.get('title', '')
+                        st.session_state['reader_book'] = b.get('title', '')
+                        st.success('已幫你選好這本書，切到「📘 單本閱讀」就能直接看。')
     else:
         st.info('最近 14 天沒有新增資料。')
 
