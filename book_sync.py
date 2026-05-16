@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import zipfile
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
@@ -11,6 +12,7 @@ LIBRARY_FILE = BASE / 'book_library.json'
 META_FILE = BASE / 'book_sync_meta.json'
 WATCH_DIR = Path(os.environ.get('JIM_BOOK_WATCH_DIR', str(Path.home() / 'Desktop' / '電子書'))).expanduser()
 WATCH_EXTS = {'.pdf', '.epub'}
+PREVIEW_CHARS = 900
 
 DRIVE_FOLDERS = {
     '1M5rpvl_NhAMxyHI0ctESFTVk1PCgI-SP': '電子書',
@@ -57,6 +59,69 @@ def extract_author(raw: str) -> str:
     return candidate.strip()
 
 
+def strip_html(text: str) -> str:
+    text = re.sub(r"<script.*?>.*?</script>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<style.*?>.*?</style>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"&nbsp;|&#160;", " ", text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"&lt;", "<", text)
+    text = re.sub(r"&gt;", ">", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def extract_epub_preview(path: Path) -> tuple[str, int | None]:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = [n for n in zf.namelist() if n.lower().endswith(('.html', '.xhtml', '.htm'))]
+            parts = []
+            for name in names[:8]:
+                try:
+                    raw = zf.read(name).decode('utf-8', errors='ignore')
+                except Exception:
+                    continue
+                text = strip_html(raw)
+                if text:
+                    parts.append(text)
+                if sum(len(x) for x in parts) >= PREVIEW_CHARS:
+                    break
+            preview = "\n\n".join(parts)[:PREVIEW_CHARS].strip()
+            return preview, len(names) or None
+    except Exception:
+        return "", None
+
+
+def extract_pdf_preview(path: Path) -> tuple[str, int | None]:
+    try:
+        import fitz
+    except Exception:
+        return "", None
+    try:
+        doc = fitz.open(path)
+        texts = []
+        page_count = len(doc)
+        for idx in range(min(8, page_count)):
+            text = doc[idx].get_text("text")
+            text = re.sub(r"\s+", " ", text).strip()
+            if text:
+                texts.append(text)
+            if sum(len(x) for x in texts) >= PREVIEW_CHARS:
+                break
+        doc.close()
+        return "\n\n".join(texts)[:PREVIEW_CHARS].strip(), page_count
+    except Exception:
+        return "", None
+
+
+def extract_preview(path: Path) -> tuple[str, int | None]:
+    if path.suffix.lower() == ".epub":
+        return extract_epub_preview(path)
+    if path.suffix.lower() == ".pdf":
+        return extract_pdf_preview(path)
+    return "", None
+
+
 def scan_local_books() -> list[dict]:
     books = []
     if not WATCH_DIR.exists():
@@ -66,6 +131,7 @@ def scan_local_books() -> list[dict]:
             continue
         stat = path.stat()
         title = clean_title(path.name)
+        preview, page_count = extract_preview(path)
         books.append({
             'id': f'local_{abs(hash(str(path))) % 10**12:012d}',
             'title': title,
@@ -79,7 +145,9 @@ def scan_local_books() -> list[dict]:
             'added_date': time.strftime('%Y-%m-%d', time.localtime(stat.st_mtime)),
             'local_path': str(path),
             'exists': True,
-        })
+            'preview': preview,
+            'page_count': page_count,
+            })
     return books
 
 
@@ -118,6 +186,8 @@ def scan_drive_books() -> list[dict]:
                 'added_date': time.strftime('%Y-%m-%d'),
                 'local_path': '',
                 'exists': False,
+                'preview': '',
+                'page_count': None,
             })
     return books
 

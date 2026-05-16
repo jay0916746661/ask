@@ -65,6 +65,55 @@ def recent_books(books, days=7):
     return out
 
 
+def category_style(category: str) -> tuple[str, str]:
+    palette = {
+        '投資/財富': ('#21493d', '#f4efe4'),
+        'AI/科技': ('#21354a', '#eef3f7'),
+        '人性/心理': ('#6d3b3b', '#f8efea'),
+        '生活/心智': ('#5c4b32', '#f5f0e6'),
+        '溝通/談判': ('#4c3e63', '#f1ecf8'),
+        '商業/創業': ('#7a4c20', '#f7eee4'),
+        '其他': ('#3a3a3a', '#f2efe8'),
+    }
+    return palette.get(category or '其他', palette['其他'])
+
+
+def render_cover(book: dict):
+    bg, fg = category_style(book.get('category'))
+    title = book.get('title', '未命名書籍')
+    author = book.get('author') or book.get('category') or '書庫'
+    st.markdown(
+        f"""
+        <div style="background:{bg}; color:{fg}; border-radius:14px; padding:24px 18px; min-height:320px;
+                    display:flex; flex-direction:column; justify-content:space-between; box-shadow:0 8px 24px rgba(0,0,0,0.08);">
+            <div style="font-size:12px; letter-spacing:0.18em; opacity:0.85;">JIM LIBRARY</div>
+            <div style="font-size:30px; font-weight:800; line-height:1.22;">{title[:90]}</div>
+            <div>
+                <div style="font-size:14px; opacity:0.92;">{author[:60]}</div>
+                <div style="font-size:12px; opacity:0.75; margin-top:6px;">{book.get('format','').upper()} · {book.get('source','')}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def pick_featured_book(books: list[dict]) -> dict | None:
+    if not books:
+        return None
+    sorted_books = sorted(
+        books,
+        key=lambda b: (
+            b.get('exists', False),
+            bool(b.get('preview')),
+            b.get('mtime', 0),
+            b.get('added_date', ''),
+        ),
+        reverse=True,
+    )
+    return sorted_books[0]
+
+
 def weekly_logs(logs):
     cutoff = datetime.now() - timedelta(days=7)
     out = []
@@ -137,17 +186,72 @@ with summary_tab:
             '分類': b.get('category',''),
             '來源': b.get('source',''),
             '格式': b.get('format',''),
+            '頁數/章數': b.get('page_count','') or '',
             '大小(MB)': b.get('size_mb',''),
             '新增日期': b.get('added_date',''),
             '本機狀態': '有' if b.get('exists') else '缺',
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=520)
+    featured = pick_featured_book(filtered)
+    preview_col, detail_col = st.columns([1.05, 1.95], gap='large')
+    with preview_col:
+        st.subheader('本期推薦')
+        if featured:
+            render_cover(featured)
+        else:
+            st.info('目前沒有符合條件的書。')
+    with detail_col:
+        st.subheader('書庫明細')
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=380)
+        if filtered:
+            selected_title = st.selectbox('選一本查看詳情', [b.get('title','') for b in filtered], key='selected_book')
+            selected = next((b for b in filtered if b.get('title') == selected_title), filtered[0])
+            info1, info2 = st.columns([1.2, 1])
+            with info1:
+                st.markdown(f"### {selected.get('title','')}")
+                st.caption(f"{selected.get('author') or '作者未解析'} · {selected.get('category','其他')} · {selected.get('source','')}")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric('格式', (selected.get('format') or '—').upper())
+                m2.metric('頁數/章數', selected.get('page_count') or '—')
+                m3.metric('大小(MB)', selected.get('size_mb') or '—')
+                m4.metric('本機', '有' if selected.get('exists') else '缺')
+                if selected.get('local_path'):
+                    st.code(selected.get('local_path'))
+                if selected.get('preview'):
+                    st.markdown('**內文預覽**')
+                    st.markdown(
+                        f"<div style='background:#faf7f2;border:1px solid #e8dfd1;border-radius:12px;padding:16px;line-height:1.9;'>"
+                        f"{selected.get('preview','').replace(chr(10), '<br>')}"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.info('這本書目前還沒有抽到可讀預覽。若是 Drive 書單或掃描型 PDF，這是預期行為。')
+            with info2:
+                st.markdown('**書籍資訊**')
+                st.markdown(f"- 新增日期：`{selected.get('added_date','')}`")
+                st.markdown(f"- 來源：`{selected.get('source','')}`")
+                st.markdown(f"- 分類：`{selected.get('category','其他')}`")
+                st.markdown(f"- 資料夾：`{selected.get('folder','')}`")
+                if not selected.get('exists'):
+                    st.warning('這本書目前只在 Drive 書單中，尚未出現在本機電子書資料夾。')
     st.divider()
     st.subheader('最近新增')
-    latest = recent_books(books, days=14)[:20]
+    latest = recent_books(books, days=14)[:12]
     if latest:
-        for b in latest:
-            st.markdown(f"- `{b.get('added_date','')}` **{b.get('title','')}** · {b.get('category','其他')} · {b.get('source','')}")
+        cols = st.columns(3)
+        for idx, b in enumerate(latest):
+            with cols[idx % 3]:
+                bg, fg = category_style(b.get('category'))
+                st.markdown(
+                    f"""
+                    <div style="background:{fg}; border:1px solid #eadfcd; border-radius:12px; padding:14px 14px 12px; min-height:150px; margin-bottom:12px;">
+                        <div style="font-size:11px; letter-spacing:0.14em; color:#6f6254;">NEW ARRIVAL · {b.get('added_date','')}</div>
+                        <div style="font-size:18px; font-weight:700; line-height:1.35; margin:10px 0 8px; color:#1f1b18;">{b.get('title','')[:80]}</div>
+                        <div style="font-size:12px; color:#665b50;">{b.get('category','其他')} · {b.get('source','')}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
     else:
         st.info('最近 14 天沒有新增資料。')
 
