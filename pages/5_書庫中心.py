@@ -296,20 +296,57 @@ with summary_tab:
             '本機狀態': '有' if b.get('exists') else '缺',
         })
 
+    selected_key = 'library_selected_book'
+    selected_titles = [b.get('title', '') for b in filtered]
+    if filtered and st.session_state.get(selected_key) not in selected_titles:
+        st.session_state[selected_key] = filtered[0].get('title', '')
+
     featured = pick_featured_book(filtered)
     preview_col, detail_col = st.columns([1.05, 1.95], gap='large')
     with preview_col:
         st.subheader('本期推薦')
         if featured:
             render_cover(featured, 'featured_cover')
+            ft_progress = progress.get(featured.get('title', ''), {})
+            ft_pages = int(ft_progress.get('pages', 0))
+            ft_total = int(featured.get('page_count') or 0)
+            ft_pct = min(100, int((ft_pages / ft_total) * 100)) if ft_total else 0
+            st.caption(f"{featured.get('author') or '作者未解析'} · {featured.get('category', '其他')}")
+            st.progress(ft_pct / 100 if ft_pct else 0, text=f'進度 {ft_pct}% · {ft_pages} / {ft_total or "?"} 頁')
         else:
             st.info('目前沒有符合條件的書。')
+
     with detail_col:
-        st.subheader('書庫明細')
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=380)
+        st.subheader('書庫瀏覽')
+        view_mode = st.radio('瀏覽模式', ['明細列表', '書架視圖'], horizontal=True, label_visibility='collapsed')
+
+        if view_mode == '明細列表':
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=380)
+            if filtered:
+                st.selectbox('選一本查看詳情', selected_titles, key=selected_key)
+        else:
+            st.caption('像書店一樣直接看封面，點選某一本到下方看詳情。')
+            shelf_cols = st.columns(4)
+            for idx, b in enumerate(filtered[:24]):
+                with shelf_cols[idx % 4]:
+                    render_cover(b, f'shelf_cover_{idx}')
+                    bp = progress.get(b.get('title', ''), {})
+                    done_pages = int(bp.get('pages', 0))
+                    total_pages = int(b.get('page_count') or 0)
+                    pct = min(100, int((done_pages / total_pages) * 100)) if total_pages else 0
+                    st.markdown(f"**{b.get('title', '')[:28]}**")
+                    st.caption(f"{b.get('category', '其他')} · {(b.get('format') or '—').upper()}")
+                    st.progress(pct / 100 if pct else 0, text=f'{pct}%')
+                    if st.button('查看詳情', key=f'shelf_pick_{idx}', use_container_width=True):
+                        st.session_state[selected_key] = b.get('title', '')
+                        st.rerun()
+            if len(filtered) > 24:
+                st.caption(f'目前先顯示前 24 本，已篩選到 {len(filtered)} 本。可以縮小篩選條件更快找到書。')
+
         if filtered:
-            selected_title = st.selectbox('選一本查看詳情', [b.get('title', '') for b in filtered], key='selected_book')
+            selected_title = st.session_state.get(selected_key, filtered[0].get('title', ''))
             selected = next((b for b in filtered if b.get('title') == selected_title), filtered[0])
+            st.divider()
             info1, info2 = st.columns([1.2, 1])
             with info1:
                 st.markdown(f"### {selected.get('title', '')}")
