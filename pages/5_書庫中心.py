@@ -16,6 +16,9 @@ LIBRARY_FILE = BASE / 'book_library.json'
 META_FILE = BASE / 'book_sync_meta.json'
 READING_FILE = BASE / 'book_reading_state.json'
 SYNC_SCRIPT = BASE / 'book_sync.py'
+AUDIO_SCRIPT = BASE / 'book_to_audio.py'
+AUDIO_DIR = BASE / 'audio_books'
+AUDIO_INDEX_FILE = AUDIO_DIR / 'audio_index.json'
 WATCH_DIR = Path(os.environ.get('JIM_BOOK_WATCH_DIR', str(Path.home() / 'Desktop' / '電子書'))).expanduser()
 
 
@@ -35,6 +38,16 @@ def run_sync():
     return result.returncode == 0, result.stdout, result.stderr
 
 
+def run_audio(book: dict, limit_chunks: int | None = None, force: bool = False):
+    cmd = [sys.executable, str(AUDIO_SCRIPT), '--book-id', book.get('id', '')]
+    if limit_chunks:
+        cmd += ['--limit-chunks', str(limit_chunks)]
+    if force:
+        cmd += ['--force']
+    result = subprocess.run(cmd, cwd=BASE, text=True, capture_output=True)
+    return result.returncode == 0, result.stdout, result.stderr
+
+
 def load_library():
     return load_json(LIBRARY_FILE, [])
 
@@ -48,6 +61,30 @@ def load_reading():
     data.setdefault('logs', [])
     data.setdefault('resume', {})
     return data
+
+
+def load_audio_index():
+    rows = load_json(AUDIO_INDEX_FILE, [])
+    return rows if isinstance(rows, list) else []
+
+
+def audio_map():
+    return {row.get('id', ''): row for row in load_audio_index() if row.get('id')}
+
+
+def format_audio_time(seconds: int) -> str:
+    seconds = int(seconds or 0)
+    if seconds < 60:
+        return f'{seconds} 秒'
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f'{minutes} 分 {sec} 秒' if sec else f'{minutes} 分'
+    hours, minutes = divmod(minutes, 60)
+    return f'{hours}h {minutes}m' if minutes else f'{hours}h'
+
+
+def find_audio_entry(book: dict, audio_entries: dict):
+    return audio_entries.get(book.get('id', ''))
 
 
 def save_reading(data):
@@ -238,6 +275,7 @@ with st.sidebar:
 
 books = load_library()
 meta = load_meta()
+audio_entries = audio_map()
 reading = load_reading()
 logs = reading['logs']
 resume = reading['resume']
@@ -256,7 +294,7 @@ st.caption(
     f"封面 {meta.get('cover_count', 0)} 本 · 預覽 {meta.get('preview_count', 0)} 本"
 )
 
-summary_tab, sync_tab, reading_tab, reader_tab = st.tabs(['📖 書庫總覽', '🔄 同步狀態', '📝 每週閱讀報告', '📘 單本閱讀'])
+summary_tab, sync_tab, reading_tab, reader_tab, audio_tab = st.tabs(['📖 書庫總覽', '🔄 同步狀態', '📝 每週閱讀報告', '📘 單本閱讀', '🎧 整本語音'])
 
 with summary_tab:
     left, right = st.columns([1, 3])
@@ -603,3 +641,108 @@ with reader_tab:
                 st.markdown('**這本書最近的閱讀記錄**')
                 for row in reversed(book_week_logs[-8:]):
                     st.markdown(f"- `{row['date']}` {row['minutes']} 分 / {row['pages']} 頁 · {row.get('note', '')}")
+
+with audio_tab:
+    st.subheader('整本語音書')
+    local_books = [b for b in books if b.get('exists') and b.get('local_path')]
+    if not local_books:
+        st.info('目前沒有可轉成語音的本機書。先同步，或把電子書放進監看資料夾。')
+    else:
+        st.caption('使用 macOS 內建語音引擎把整本書切成多段 m4a。適合通勤、散步、睡前收聽。')
+        selected_title = st.selectbox('選擇要轉成語音的書', [b.get('title', '') for b in local_books], key='audio_book')
+        selected = next((b for b in local_books if b.get('title') == selected_title), local_books[0])
+        entry = find_audio_entry(selected, audio_entries)
+
+        top_left, top_right = st.columns([1, 2], gap='large')
+        with top_left:
+            render_cover(selected, 'audio_cover')
+        with top_right:
+            st.markdown(f"### {selected.get('title', '')}")
+            st.caption(f"{selected.get('author') or '作者未解析'} · {selected.get('category', '其他')} · {(selected.get('format') or '').upper()}")
+            if entry:
+                m1, m2, m3 = st.columns(3)
+                m1.metric('已轉段數', entry.get('chunk_count', 0))
+                m2.metric('估計時長', format_audio_time(entry.get('total_seconds_estimate', 0)))
+                m3.metric('生成時間', (entry.get('generated_at', '') or '—')[:16])
+                st.success('這本書已有完整語音輸出。')
+            else:
+                st.info('這本書還沒生成語音。')
+
+            btn1, btn2, btn3 = st.columns(3)
+            with btn1:
+                if st.button('先測 1 段', key='audio_test', use_container_width=True):
+                    with st.spinner('正在生成測試音檔...'):
+                        ok, out, err = run_audio(selected, limit_chunks=1, force=True)
+                    if ok:
+                        st.success('測試音檔已生成')
+                        if out.strip():
+                            st.code(out)
+                        st.rerun()
+                    else:
+                        st.error('生成失敗')
+                        st.code((out or '') + '\n' + (err or ''))
+            with btn2:
+                if st.button('生成整本語音', key='audio_full', type='primary', use_container_width=True):
+                    with st.spinner('正在把整本書轉成語音，這可能需要幾分鐘...'):
+                        ok, out, err = run_audio(selected, force=True)
+                    if ok:
+                        st.success('整本語音已生成')
+                        if out.strip():
+                            st.code(out)
+                        st.rerun()
+                    else:
+                        st.error('生成失敗')
+                        st.code((out or '') + '\n' + (err or ''))
+            with btn3:
+                if st.button('刷新語音索引', key='audio_refresh', use_container_width=True):
+                    st.rerun()
+
+            if entry:
+                st.markdown('**音檔位置**')
+                st.code(entry.get('audio_dir', ''))
+                manifest_path = Path(entry.get('manifest_path', ''))
+                if manifest_path.exists():
+                    manifest = load_json(manifest_path, {})
+                    files = manifest.get('files', [])
+                    if files:
+                        st.markdown('**播放預覽**')
+                        pick = st.selectbox(
+                            '選一段播放',
+                            [f"第 {x.get('index', 0)} 段 · 約 {x.get('seconds_estimate', 0)} 秒" for x in files[:30]],
+                            key='audio_chunk_pick',
+                        )
+                        idx = int(pick.split()[1]) if pick else 1
+                        chosen = next((x for x in files if int(x.get('index', 0)) == idx), files[0])
+                        audio_path = Path(chosen.get('audio_file', ''))
+                        text_path = Path(chosen.get('text_file', ''))
+                        if audio_path.exists():
+                            st.audio(audio_path.read_bytes(), format='audio/mp4')
+                        if text_path.exists():
+                            st.markdown('**這段文字**')
+                            st.markdown(
+                                f"<div style='background:#faf7f2;border:1px solid #e8dfd1;border-radius:12px;padding:16px;line-height:1.9;'>"
+                                f"{escape(text_path.read_text(encoding='utf-8')[:5000]).replace(chr(10), '<br>')}"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+                        playlist_path = Path(entry.get('playlist', ''))
+                        if playlist_path.exists():
+                            st.download_button('下載播放清單 m3u', data=playlist_path.read_bytes(), file_name=playlist_path.name, use_container_width=True)
+
+        st.divider()
+        st.markdown('**已生成的有聲書**')
+        audio_rows = list(audio_entries.values())
+        if audio_rows:
+            table = pd.DataFrame([
+                {
+                    '書名': x.get('title', ''),
+                    '分類': x.get('category', ''),
+                    '段數': x.get('chunk_count', 0),
+                    '估計時長': format_audio_time(x.get('total_seconds_estimate', 0)),
+                    '生成時間': x.get('generated_at', ''),
+                }
+                for x in sorted(audio_rows, key=lambda r: r.get('generated_at', ''), reverse=True)
+            ])
+            st.dataframe(table, use_container_width=True, hide_index=True)
+        else:
+            st.info('目前還沒有任何已生成的整本語音。')
