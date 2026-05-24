@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -19,6 +20,10 @@ SYNC_SCRIPT = BASE / 'book_sync.py'
 AUDIO_SCRIPT = BASE / 'book_to_audio.py'
 AUDIO_DIR = BASE / 'audio_books'
 AUDIO_INDEX_FILE = AUDIO_DIR / 'audio_index.json'
+AUDIO_CLOUD_DIR = Path(os.environ.get(
+    'JIM_AUDIO_CLOUD_DIR',
+    str(Path.home() / 'Library' / 'CloudStorage' / 'GoogleDrive-jay0916746661@gmail.com' / '我的雲端硬碟' / 'Jim有聲書'),
+)).expanduser()
 WATCH_DIR = Path(os.environ.get('JIM_BOOK_WATCH_DIR', str(Path.home() / 'Desktop' / '電子書'))).expanduser()
 
 
@@ -85,6 +90,37 @@ def format_audio_time(seconds: int) -> str:
 
 def find_audio_entry(book: dict, audio_entries: dict):
     return audio_entries.get(book.get('id', ''))
+
+
+def book_by_id(books: list[dict], book_id: str) -> dict | None:
+    return next((b for b in books if b.get('id') == book_id), None)
+
+
+def audio_output_dir(entry: dict) -> Path | None:
+    manifest_path = Path(entry.get('manifest_path', ''))
+    if manifest_path.exists():
+        return manifest_path.parent
+    audio_dir = Path(entry.get('audio_dir', ''))
+    return audio_dir.parent if audio_dir.exists() else None
+
+
+def sync_audio_to_cloud(entry: dict) -> Path:
+    src = audio_output_dir(entry)
+    if not src or not src.exists():
+        raise FileNotFoundError('找不到這本有聲書的輸出資料夾')
+    AUDIO_CLOUD_DIR.mkdir(parents=True, exist_ok=True)
+    dest = AUDIO_CLOUD_DIR / src.name
+    shutil.copytree(src, dest, dirs_exist_ok=True)
+    return dest
+
+
+def load_audio_manifest(entry: dict) -> dict:
+    manifest_path = Path(entry.get('manifest_path', ''))
+    return load_json(manifest_path, {}) if manifest_path.exists() else {}
+
+
+def audio_segment_label(item: dict) -> str:
+    return f"第 {int(item.get('index', 0)):03d} 段 · {format_audio_time(item.get('seconds_estimate', 0))}"
 
 
 def save_reading(data):
@@ -644,32 +680,113 @@ with reader_tab:
 
 with audio_tab:
     st.subheader('整本語音書')
+    batch_status = load_json(AUDIO_DIR / 'batch_status.json', {})
+    if batch_status:
+        state = batch_status.get('state', 'unknown')
+        title = batch_status.get('title', '')
+        updated = batch_status.get('updated_at', '')
+        if state == 'running':
+            st.info(f"背景批次進行中：{batch_status.get('current_index', '?')} / {batch_status.get('total', '?')} · {title} · {updated}")
+        elif state == 'done':
+            st.success(f"背景批次已完成 · {updated}")
+
+    audio_rows = sorted(list(audio_entries.values()), key=lambda r: r.get('generated_at', ''), reverse=True)
+    generated_ids = {x.get('id') for x in audio_rows}
     local_books = [b for b in books if b.get('exists') and b.get('local_path')]
-    if not local_books:
-        st.info('目前沒有可轉成語音的本機書。先同步，或把電子書放進監看資料夾。')
-    else:
-        st.caption('使用 macOS 內建語音引擎把整本書切成多段 m4a。適合通勤、散步、睡前收聽。')
-        selected_title = st.selectbox('選擇要轉成語音的書', [b.get('title', '') for b in local_books], key='audio_book')
-        selected = next((b for b in local_books if b.get('title') == selected_title), local_books[0])
-        entry = find_audio_entry(selected, audio_entries)
 
-        top_left, top_right = st.columns([1, 2], gap='large')
-        with top_left:
-            render_cover(selected, 'audio_cover')
-        with top_right:
-            st.markdown(f"### {selected.get('title', '')}")
-            st.caption(f"{selected.get('author') or '作者未解析'} · {selected.get('category', '其他')} · {(selected.get('format') or '').upper()}")
-            if entry:
+    player_col, action_col = st.columns([1.25, 1], gap='large')
+    with player_col:
+        st.markdown('**有聲書播放器**')
+        if not audio_rows:
+            st.info('目前還沒有任何已生成的有聲書。先在右側選一本生成。')
+        else:
+            audio_titles = [f"{x.get('title', '')} · {x.get('chunk_count', 0)} 段 · {format_audio_time(x.get('total_seconds_estimate', 0))}" for x in audio_rows]
+            selected_audio_label = st.selectbox('選擇已生成有聲書', audio_titles, key='audio_library_pick')
+            selected_audio = audio_rows[audio_titles.index(selected_audio_label)]
+            selected_book = book_by_id(books, selected_audio.get('id', '')) or {'title': selected_audio.get('title', ''), 'category': selected_audio.get('category', '其他')}
+            manifest = load_audio_manifest(selected_audio)
+            files = manifest.get('files', [])
+
+            top_a, top_b = st.columns([0.65, 1.35], gap='large')
+            with top_a:
+                render_cover(selected_book, 'audio_player_cover')
+            with top_b:
+                st.markdown(f"### {selected_audio.get('title', '')}")
+                st.caption(f"{selected_audio.get('category', '其他')} · {selected_audio.get('voice', 'default')} · {selected_audio.get('chunk_count', 0)} 段")
                 m1, m2, m3 = st.columns(3)
-                m1.metric('已轉段數', entry.get('chunk_count', 0))
-                m2.metric('估計時長', format_audio_time(entry.get('total_seconds_estimate', 0)))
-                m3.metric('生成時間', (entry.get('generated_at', '') or '—')[:16])
-                st.success('這本書已有完整語音輸出。')
-            else:
-                st.info('這本書還沒生成語音。')
+                m1.metric('總長度', format_audio_time(selected_audio.get('total_seconds_estimate', 0)))
+                m2.metric('段數', selected_audio.get('chunk_count', 0))
+                m3.metric('生成', (selected_audio.get('generated_at', '') or '—')[:16])
 
-            btn1, btn2, btn3 = st.columns(3)
-            with btn1:
+            if files:
+                if 'audio_segment_index' not in st.session_state:
+                    st.session_state['audio_segment_index'] = 1
+                max_idx = max(1, len(files))
+                current_idx = min(max(1, int(st.session_state.get('audio_segment_index', 1))), max_idx)
+                nav1, nav2, nav3, nav4 = st.columns([1, 1, 2, 1])
+                with nav1:
+                    if st.button('上一段', use_container_width=True, disabled=current_idx <= 1):
+                        st.session_state['audio_segment_index'] = max(1, current_idx - 1)
+                        st.rerun()
+                with nav2:
+                    if st.button('下一段', use_container_width=True, disabled=current_idx >= max_idx):
+                        st.session_state['audio_segment_index'] = min(max_idx, current_idx + 1)
+                        st.rerun()
+                with nav3:
+                    current_idx = st.number_input('段落', min_value=1, max_value=max_idx, value=current_idx, step=1, key='audio_segment_number')
+                    st.session_state['audio_segment_index'] = current_idx
+                with nav4:
+                    st.caption(f'{current_idx} / {max_idx}')
+
+                chosen = files[current_idx - 1]
+                audio_path = Path(chosen.get('audio_file', ''))
+                text_path = Path(chosen.get('text_file', ''))
+                st.markdown(f"**{audio_segment_label(chosen)}**")
+                if audio_path.exists():
+                    st.audio(audio_path.read_bytes(), format='audio/mp4')
+                    st.download_button('下載這一段音檔', data=audio_path.read_bytes(), file_name=audio_path.name, mime='audio/mp4', use_container_width=True)
+                else:
+                    st.warning('這一段音檔不存在，可能還在生成中。')
+
+                dl1, dl2 = st.columns(2)
+                playlist_path = Path(selected_audio.get('playlist', ''))
+                with dl1:
+                    if playlist_path.exists():
+                        st.download_button('下載播放清單 m3u', data=playlist_path.read_bytes(), file_name=playlist_path.name, use_container_width=True)
+                with dl2:
+                    if st.button('同步這本到 Google Drive', use_container_width=True):
+                        try:
+                            dest = sync_audio_to_cloud(selected_audio)
+                            st.success(f'已同步到：{dest}')
+                        except Exception as exc:
+                            st.error(f'同步失敗：{exc}')
+
+                if text_path.exists():
+                    with st.expander('查看這段文字', expanded=False):
+                        st.markdown(
+                            f"<div style='background:#faf7f2;border:1px solid #e8dfd1;border-radius:12px;padding:16px;line-height:1.9;'>"
+                            f"{escape(text_path.read_text(encoding='utf-8')[:7000]).replace(chr(10), '<br>')}"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+            else:
+                st.warning('這本有索引，但找不到段落資料。')
+
+    with action_col:
+        st.markdown('**生成與雲端同步**')
+        st.caption(f'Google Drive 目標：`{AUDIO_CLOUD_DIR}`')
+        pending_books = [b for b in local_books if b.get('id') not in generated_ids]
+        mode = st.radio('選書模式', ['尚未生成', '全部本機書'], horizontal=True)
+        candidates = pending_books if mode == '尚未生成' else local_books
+        if not candidates:
+            st.success('目前沒有尚未生成的本機書。')
+        else:
+            selected_title = st.selectbox('選一本生成', [b.get('title', '') for b in candidates], key='audio_generate_book')
+            selected = next((b for b in candidates if b.get('title') == selected_title), candidates[0])
+            render_cover(selected, 'audio_generate_cover')
+            st.caption(f"{selected.get('category', '其他')} · {(selected.get('format') or '').upper()} · {selected.get('page_count') or '—'} 頁/章")
+            g1, g2 = st.columns(2)
+            with g1:
                 if st.button('先測 1 段', key='audio_test', use_container_width=True):
                     with st.spinner('正在生成測試音檔...'):
                         ok, out, err = run_audio(selected, limit_chunks=1, force=True)
@@ -681,8 +798,8 @@ with audio_tab:
                     else:
                         st.error('生成失敗')
                         st.code((out or '') + '\n' + (err or ''))
-            with btn2:
-                if st.button('生成整本語音', key='audio_full', type='primary', use_container_width=True):
+            with g2:
+                if st.button('生成整本', key='audio_full', type='primary', use_container_width=True):
                     with st.spinner('正在把整本書轉成語音，這可能需要幾分鐘...'):
                         ok, out, err = run_audio(selected, force=True)
                     if ok:
@@ -693,56 +810,39 @@ with audio_tab:
                     else:
                         st.error('生成失敗')
                         st.code((out or '') + '\n' + (err or ''))
-            with btn3:
-                if st.button('刷新語音索引', key='audio_refresh', use_container_width=True):
-                    st.rerun()
-
-            if entry:
-                st.markdown('**音檔位置**')
-                st.code(entry.get('audio_dir', ''))
-                manifest_path = Path(entry.get('manifest_path', ''))
-                if manifest_path.exists():
-                    manifest = load_json(manifest_path, {})
-                    files = manifest.get('files', [])
-                    if files:
-                        st.markdown('**播放預覽**')
-                        pick = st.selectbox(
-                            '選一段播放',
-                            [f"第 {x.get('index', 0)} 段 · 約 {x.get('seconds_estimate', 0)} 秒" for x in files[:30]],
-                            key='audio_chunk_pick',
-                        )
-                        idx = int(pick.split()[1]) if pick else 1
-                        chosen = next((x for x in files if int(x.get('index', 0)) == idx), files[0])
-                        audio_path = Path(chosen.get('audio_file', ''))
-                        text_path = Path(chosen.get('text_file', ''))
-                        if audio_path.exists():
-                            st.audio(audio_path.read_bytes(), format='audio/mp4')
-                        if text_path.exists():
-                            st.markdown('**這段文字**')
-                            st.markdown(
-                                f"<div style='background:#faf7f2;border:1px solid #e8dfd1;border-radius:12px;padding:16px;line-height:1.9;'>"
-                                f"{escape(text_path.read_text(encoding='utf-8')[:5000]).replace(chr(10), '<br>')}"
-                                f"</div>",
-                                unsafe_allow_html=True,
-                            )
-                        playlist_path = Path(entry.get('playlist', ''))
-                        if playlist_path.exists():
-                            st.download_button('下載播放清單 m3u', data=playlist_path.read_bytes(), file_name=playlist_path.name, use_container_width=True)
 
         st.divider()
-        st.markdown('**已生成的有聲書**')
-        audio_rows = list(audio_entries.values())
-        if audio_rows:
-            table = pd.DataFrame([
-                {
-                    '書名': x.get('title', ''),
-                    '分類': x.get('category', ''),
-                    '段數': x.get('chunk_count', 0),
-                    '估計時長': format_audio_time(x.get('total_seconds_estimate', 0)),
-                    '生成時間': x.get('generated_at', ''),
-                }
-                for x in sorted(audio_rows, key=lambda r: r.get('generated_at', ''), reverse=True)
-            ])
-            st.dataframe(table, use_container_width=True, hide_index=True)
-        else:
-            st.info('目前還沒有任何已生成的整本語音。')
+        if st.button('同步全部已生成到 Google Drive', use_container_width=True):
+            synced = 0
+            errors = []
+            for item in audio_rows:
+                try:
+                    sync_audio_to_cloud(item)
+                    synced += 1
+                except Exception as exc:
+                    errors.append(f"{item.get('title', '')}: {exc}")
+            if synced:
+                st.success(f'已同步 {synced} 本到 Google Drive')
+            if errors:
+                st.warning('\n'.join(errors[:5]))
+
+        if st.button('刷新語音索引', key='audio_refresh', use_container_width=True):
+            st.rerun()
+
+    st.divider()
+    st.markdown('**已生成清單**')
+    if audio_rows:
+        table = pd.DataFrame([
+            {
+                '書名': x.get('title', ''),
+                '分類': x.get('category', ''),
+                '段數': x.get('chunk_count', 0),
+                '估計時長': format_audio_time(x.get('total_seconds_estimate', 0)),
+                '聲音': x.get('voice', ''),
+                '生成時間': x.get('generated_at', ''),
+            }
+            for x in audio_rows
+        ])
+        st.dataframe(table, use_container_width=True, hide_index=True)
+    else:
+        st.info('目前還沒有任何已生成的整本語音。')
