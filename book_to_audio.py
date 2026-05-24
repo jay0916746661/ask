@@ -20,7 +20,7 @@ LIBRARY_FILE = BASE / 'book_library.json'
 OUTPUT_DIR = BASE / 'audio_books'
 DEFAULT_CHUNK_CHARS = 2200
 DEFAULT_RATE = 190
-PREFERRED_VOICES = ['Ting-Ting', 'Meijia', 'Sin-ji', 'Kyoko']
+PREFERRED_VOICES = ['Flo (中文（台灣）)', 'Eddy (中文（台灣）)', 'Sandy (中文（台灣）)', 'Meijia', 'Ting-Ting', 'Sin-ji', 'Kyoko']
 AUDIO_INDEX_FILE = OUTPUT_DIR / 'audio_index.json'
 
 
@@ -139,7 +139,9 @@ def available_voices() -> list[str]:
     for line in out.splitlines():
         if not line.strip():
             continue
-        voices.append(line.split()[0])
+        # macOS voice names can contain spaces, e.g. "Flo (中文（台灣）)".
+        match = re.match(r'^(.*?)\s{2,}[a-z]{2}_[A-Z]{2}\s+#', line)
+        voices.append(match.group(1).strip() if match else line.split()[0])
     return voices
 
 
